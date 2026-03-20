@@ -904,6 +904,7 @@ export default function App() {
       try {
         const handle = await (window as any).showSaveFilePicker({
           suggestedName: importedFileName || `layout-projects-${new Date().toISOString().split('T')[0]}.json`,
+          startIn: fileHandle || undefined,
           types: [{
             description: 'JSON Files',
             accept: { 'application/json': ['.json'] },
@@ -1167,32 +1168,29 @@ export default function App() {
           {/* File Management */}
           <section>
             <h2 className="text-xs font-bold uppercase tracking-wider text-stone-400 mb-3 px-2">파일 관리</h2>
-            <div className="grid grid-cols-2 gap-2 px-2">
-              <button 
-                onClick={exportProjects}
-                className="flex items-center justify-center gap-2 py-2 px-3 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-xs font-semibold transition-all"
-                title={fileHandle ? "현재 파일에 덮어쓰기" : "프로젝트 파일로 저장"}
-              >
-                <Download size={14} />
-                저장하기
-              </button>
-              <button 
-                onClick={saveProjectsAs}
-                className="flex items-center justify-center gap-2 py-2 px-3 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-xs font-semibold transition-all"
-                title="다른 이름으로 저장"
-              >
-                <Save size={14} />
-                다른 이름으로
-              </button>
-              <button 
-                onClick={handleImportWithHandle}
-                className="flex items-center justify-center gap-2 py-2 px-3 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-xs font-semibold transition-all col-span-2"
-                title="프로젝트 파일 불러오기"
-              >
-                <Upload size={14} />
-                불러오기
-              </button>
-            </div>
+              <div className="grid grid-cols-3 gap-2 px-2">
+                <button 
+                  onClick={exportProjects}
+                  className="flex items-center justify-center py-2 px-3 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg transition-all"
+                  title="저장하기"
+                >
+                  <Download size={16} />
+                </button>
+                <button 
+                  onClick={saveProjectsAs}
+                  className="flex items-center justify-center py-2 px-3 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg transition-all"
+                  title="다른 이름으로 저장"
+                >
+                  <Save size={16} />
+                </button>
+                <button 
+                  onClick={handleImportWithHandle}
+                  className="flex items-center justify-center py-2 px-3 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg transition-all"
+                  title="불러오기"
+                >
+                  <Upload size={16} />
+                </button>
+              </div>
           </section>
 
           {/* Project & Layout List */}
@@ -1613,7 +1611,7 @@ export default function App() {
                 <Layers size={40} />
               </div>
               <div className="space-y-2">
-                <h2 className="text-2xl font-bold text-stone-900">새로운 시작</h2>
+                <h2 className="text-2xl font-bold text-stone-900">Layout Designer</h2>
                 <p className="text-stone-500">프로젝트를 생성하거나 기존 파일을 불러와서 작업을 시작하세요.</p>
               </div>
               <div className="grid grid-cols-2 gap-4">
