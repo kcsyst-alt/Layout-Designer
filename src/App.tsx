@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { Stage, Layer, Rect, Text, Group, Circle, Line, Path, Image as KonvaImage } from 'react-konva';
+import { Stage, Layer, Rect, Text, Group, Circle, Line, Path, Image as KonvaImage, Transformer } from 'react-konva';
 import useImage from 'use-image';
 import { 
   Monitor, 
@@ -53,7 +53,11 @@ import {
   Redo2,
   Pin,
   PinOff,
-  Check
+  Check,
+  Pen,
+  Circle as CircleIcon,
+  Eraser,
+  MousePointer2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -94,6 +98,29 @@ interface Connection {
   to: string;
 }
 
+type BgElementType = 'pen' | 'rect' | 'circle' | 'symbol' | 'text';
+
+interface BackgroundElement {
+  id: string;
+  type: BgElementType;
+  points?: number[];
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  radius?: number;
+  stroke: string;
+  strokeWidth: number;
+  fill?: string;
+  scaleX?: number;
+  scaleY?: number;
+  rotation?: number;
+  symbolType?: string;
+  pathData?: string;
+  text?: string;
+  fontSize?: number;
+}
+
 interface ItemDefinition {
   type: ItemType;
   label: string;
@@ -111,6 +138,7 @@ interface Layout {
   canvasSize: { width: number; height: number };
   bgImageUrl: string | null;
   bgImageOpacity: number;
+  backgroundElements?: BackgroundElement[];
 }
 
 interface Project {
@@ -176,7 +204,17 @@ const ZebraPrinterIcon = ({ size = 20, color = 'currentColor', strokeWidth = 1.6
   </svg>
 );
 
-// --- Constants ---
+const ARCH_SYMBOLS = [
+  { id: 'door', label: '문', path: 'M 0 0 L 50 0 M 50 0 A 50 50 0 0 1 0 50' },
+  { id: 'window', label: '창문', path: 'M 0 0 L 50 0 M 0 20 L 50 20 M 0 7 L 50 7 M 0 13 L 50 13' },
+  { id: 'stairs', label: '계단', path: 'M 0 0 L 50 0 L 50 50 L 0 50 Z M 0 10 L 50 10 M 0 20 L 50 20 M 0 30 L 50 30 M 0 40 L 50 40 M 25 45 L 25 5 M 20 10 L 25 5 L 30 10' },
+  { id: 'toilet', label: '화장실', path: 'M 10 0 L 40 0 L 40 15 L 10 15 Z M 12 15 C 12 50 38 50 38 15' },
+  { id: 'entrance', label: '출입구', path: 'M 10 40 L 25 10 L 40 40 Z M 25 10 L 25 50' },
+  { id: 'xray', label: 'X-ray', path: 'M 0 0 L 50 0 L 50 50 L 0 50 Z M 5 5 L 45 45 M 45 5 L 5 45 M 10 10 L 40 10 L 40 40 L 10 40 Z' },
+  { id: 'weight_sorter', label: '중량 선별기', path: 'M 0 10 L 50 10 L 50 40 L 0 40 Z M 10 10 L 10 40 M 40 10 L 40 40 M 20 5 L 30 5 L 30 15 L 20 15 Z' },
+  { id: 'hygiene', label: '위생전실', path: 'M 0 0 L 50 0 L 50 50 L 0 50 Z M 15 10 C 15 5 35 5 35 10 L 35 25 C 35 35 15 35 15 25 Z M 20 40 L 30 40 M 25 35 L 25 45' },
+  { id: 'conveyor', label: '컨베어', path: 'M 0 15 L 50 15 L 50 35 L 0 35 Z M 5 15 L 5 35 M 15 15 L 15 35 M 25 15 L 25 35 M 35 15 L 35 35 M 45 15 L 45 35' },
+];
 const ITEM_DEFINITIONS: ItemDefinition[] = [
   { 
     type: 'PC', 
@@ -309,6 +347,11 @@ const OPTION_TO_TYPE: Record<string, string> = {
 };
 
 const GRID_SIZE = 40;
+const SNAP_SIZE = 10;
+
+const snapToGrid = (value: number, snap: number = SNAP_SIZE) => {
+  return Math.round(value / snap) * snap;
+};
 
 const STORAGE_KEY = 'equipment_layout_data';
 const ACTIVE_LAYOUT_KEY = 'equipment_active_layout_id';
@@ -471,6 +514,31 @@ export default function App() {
   const [mousePos, setMousePos] = useState<{x: number, y: number} | null>(null);
   const [hiddenItemTypes, setHiddenItemTypes] = useState<string[]>([]);
   const [toast, setToast] = useState<string | null>(null);
+
+  // Background Edit Mode States
+  const [isBgEditMode, setIsBgEditMode] = useState(false);
+  const [bgDrawTool, setBgDrawTool] = useState<'select' | 'pen' | 'rect' | 'circle' | 'eraser' | 'symbol' | 'text'>('pen');
+  const [bgDrawColor, setBgDrawColor] = useState('#000000');
+  const [bgDrawWidth, setBgDrawWidth] = useState(2);
+  const [bgFontSize, setBgFontSize] = useState(20);
+  const [selectedSymbolId, setSelectedSymbolId] = useState<string | null>(null);
+  const [currentBgElement, setCurrentBgElement] = useState<BackgroundElement | null>(null);
+  const [selectedBgElementId, setSelectedBgElementId] = useState<string | null>(null);
+  const bgTransformerRef = useRef<any>(null);
+
+  const rgbToHex = (r: number, g: number, b: number) => {
+    const clamp = (n: number) => Math.max(0, Math.min(255, n));
+    return "#" + ((1 << 24) + (clamp(r) << 16) + (clamp(g) << 8) + clamp(b)).toString(16).slice(1);
+  };
+
+  const hexToRgb = (hex: string) => {
+    const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    return result ? {
+      r: parseInt(result[1], 16),
+      g: parseInt(result[2], 16),
+      b: parseInt(result[3], 16)
+    } : { r: 0, g: 0, b: 0 };
+  };
 
   const showToast = (message: string) => {
     setToast(message);
@@ -642,6 +710,76 @@ export default function App() {
     })));
   };
 
+  // Update selected bg element when color/width changes
+  useEffect(() => {
+    if (isBgEditMode && selectedBgElementId && currentLayout) {
+      const el = currentLayout.backgroundElements?.find(b => b.id === selectedBgElementId);
+      if (el && (el.stroke !== bgDrawColor || el.strokeWidth !== bgDrawWidth)) {
+        updateCurrentLayout({
+          backgroundElements: currentLayout.backgroundElements?.map(b => 
+            b.id === selectedBgElementId ? { ...b, stroke: bgDrawColor, strokeWidth: bgDrawWidth } : b
+          )
+        }, false);
+      }
+    }
+  }, [bgDrawColor, bgDrawWidth]);
+
+  // Sync UI controls to selected bg element
+  useEffect(() => {
+    if (isBgEditMode && selectedBgElementId && currentLayout) {
+      const el = currentLayout.backgroundElements?.find(b => b.id === selectedBgElementId);
+      if (el) {
+        setBgDrawColor(el.stroke);
+        setBgDrawWidth(el.strokeWidth);
+      }
+    }
+  }, [selectedBgElementId]);
+
+  // Handle delete key for background elements
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && isBgEditMode && selectedBgElementId) {
+        pushToHistory();
+        updateCurrentLayout({
+          backgroundElements: currentLayout?.backgroundElements?.filter(b => b.id !== selectedBgElementId)
+        });
+        setSelectedBgElementId(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isBgEditMode, selectedBgElementId, currentLayout]);
+
+  // Update transformer
+  useEffect(() => {
+    if (isBgEditMode && bgDrawTool === 'select' && selectedBgElementId && bgTransformerRef.current && stageRef.current) {
+      const node = stageRef.current.findOne(`#bg-${selectedBgElementId}`);
+      if (node) {
+        bgTransformerRef.current.nodes([node]);
+        bgTransformerRef.current.getLayer().batchDraw();
+      }
+    } else if (bgTransformerRef.current) {
+      bgTransformerRef.current.nodes([]);
+    }
+  }, [isBgEditMode, bgDrawTool, selectedBgElementId, currentLayout?.backgroundElements]);
+
+  // Reset selection and cursor when tool changes
+  useEffect(() => {
+    if (bgDrawTool !== 'select') {
+      setSelectedBgElementId(null);
+    }
+    
+    // Reset cursor when tool changes
+    if (stageRef.current) {
+      const container = stageRef.current.container();
+      if (isBgEditMode) {
+        container.style.cursor = bgDrawTool === 'select' ? 'default' : 'crosshair';
+      } else {
+        container.style.cursor = isDrawingLine ? 'crosshair' : 'default';
+      }
+    }
+  }, [bgDrawTool, isBgEditMode, isDrawingLine]);
+
   // Project Management
   const addProject = () => {
     pushToHistory();
@@ -797,6 +935,12 @@ export default function App() {
       // But a simple approximation is often good enough:
       x = scrollLeft + clientWidth / 2;
       y = scrollTop + clientHeight / 2;
+
+      // Snap to grid if enabled
+      if (showGrid) {
+        x = snapToGrid(x);
+        y = snapToGrid(y);
+      }
 
       // Ensure it's within canvas bounds
       x = Math.max(50, Math.min(x, currentLayout.canvasSize.width - 50));
@@ -1338,9 +1482,145 @@ export default function App() {
             </div>
           </section>
 
-          {/* Equipment Icons */}
+          {/* Background Edit Mode */}
           <section>
-            <h2 className="text-xs font-bold uppercase tracking-wider text-stone-400 mb-3 px-2">일반</h2>
+            <div className="flex items-center justify-between mb-3 px-2">
+              <h2 className="text-xs font-bold uppercase tracking-wider text-stone-400">배경 편집</h2>
+              <button 
+                onClick={() => {
+                  const newMode = !isBgEditMode;
+                  setIsBgEditMode(newMode);
+                  if (newMode) {
+                    setSelectedIds([]);
+                    setHighlightedItemType(null);
+                  } else {
+                    setSelectedBgElementId(null);
+                  }
+                }}
+                className={`p-1 rounded-md transition-colors ${isBgEditMode ? 'bg-blue-100 text-blue-600' : 'hover:bg-stone-100 text-stone-500'}`}
+                title={isBgEditMode ? "배경 잠금" : "배경 편집 모드"}
+              >
+                {isBgEditMode ? <Check size={16} /> : <Edit3 size={16} />}
+              </button>
+            </div>
+            
+            {isBgEditMode && (
+              <div className="space-y-3 px-2 mb-4">
+                <div className="grid grid-cols-6 gap-1">
+                  <button onClick={() => setBgDrawTool('select')} className={`p-2 rounded flex items-center justify-center transition-colors ${bgDrawTool === 'select' ? 'bg-blue-100 text-blue-600' : 'bg-stone-50 hover:bg-stone-100 text-stone-600'}`} title="선택"><MousePointer2 size={16}/></button>
+                  <button onClick={() => setBgDrawTool('pen')} className={`p-2 rounded flex items-center justify-center transition-colors ${bgDrawTool === 'pen' ? 'bg-blue-100 text-blue-600' : 'bg-stone-50 hover:bg-stone-100 text-stone-600'}`} title="펜"><Pen size={16}/></button>
+                  <button onClick={() => setBgDrawTool('rect')} className={`p-2 rounded flex items-center justify-center transition-colors ${bgDrawTool === 'rect' ? 'bg-blue-100 text-blue-600' : 'bg-stone-50 hover:bg-stone-100 text-stone-600'}`} title="사각형"><Square size={16}/></button>
+                  <button onClick={() => setBgDrawTool('circle')} className={`p-2 rounded flex items-center justify-center transition-colors ${bgDrawTool === 'circle' ? 'bg-blue-100 text-blue-600' : 'bg-stone-50 hover:bg-stone-100 text-stone-600'}`} title="원"><CircleIcon size={16}/></button>
+                  <button onClick={() => setBgDrawTool('text')} className={`p-2 rounded flex items-center justify-center transition-colors ${bgDrawTool === 'text' ? 'bg-blue-100 text-blue-600' : 'bg-stone-50 hover:bg-stone-100 text-stone-600'}`} title="텍스트"><Edit3 size={16}/></button>
+                  <button onClick={() => setBgDrawTool('eraser')} className={`p-2 rounded flex items-center justify-center transition-colors ${bgDrawTool === 'eraser' ? 'bg-blue-100 text-blue-600' : 'bg-stone-50 hover:bg-stone-100 text-stone-600'}`} title="지우개"><Eraser size={16}/></button>
+                </div>
+                <div className="flex flex-wrap items-center gap-1">
+                  {['#000000', '#ffffff', '#ef4444', '#22c55e', '#3b82f6', '#eab308', '#a855f7'].map(color => (
+                    <button
+                      key={color}
+                      onClick={() => setBgDrawColor(color)}
+                      className={`w-5 h-5 rounded-full border border-stone-200 transition-transform hover:scale-110 ${bgDrawColor === color ? 'ring-2 ring-blue-500 ring-offset-1' : ''}`}
+                      style={{ backgroundColor: color }}
+                      title={color === '#ffffff' ? '하얀색' : color}
+                    />
+                  ))}
+                  <div className="relative w-5 h-5 rounded-full border border-stone-200 overflow-hidden cursor-pointer group shrink-0">
+                    <input 
+                      type="color" 
+                      value={bgDrawColor} 
+                      onChange={e => setBgDrawColor(e.target.value)} 
+                      className="absolute inset-[-5px] w-[200%] h-[200%] cursor-pointer border-0 p-0" 
+                      title="커스텀 색상" 
+                    />
+                  </div>
+                </div>
+                
+                <div className="flex flex-col gap-1.5 pt-1">
+                  <div className="flex items-center gap-1">
+                    <input 
+                      type="text" 
+                      value={bgDrawColor} 
+                      onChange={e => {
+                        let val = e.target.value;
+                        if (!val.startsWith('#')) val = '#' + val;
+                        if (/^#[0-9A-Fa-f]{0,6}$/.test(val)) {
+                          setBgDrawColor(val);
+                        }
+                      }}
+                      className="w-16 text-[10px] px-1 py-0.5 border border-stone-200 rounded font-mono uppercase bg-white"
+                      placeholder="#HEX"
+                      title="HEX 입력"
+                    />
+                    <div className="flex items-center gap-0.5 ml-auto">
+                      {['R', 'G', 'B'].map((label) => {
+                        const rgb = hexToRgb(bgDrawColor);
+                        const key = label.toLowerCase() as keyof typeof rgb;
+                        return (
+                          <div key={label} className="flex flex-col items-center">
+                            <span className="text-[8px] text-stone-400 leading-none mb-0.5">{label}</span>
+                            <input
+                              type="text"
+                              value={rgb[key]}
+                              onChange={(e) => {
+                                const val = parseInt(e.target.value) || 0;
+                                const newRgb = { ...rgb, [key]: val };
+                                setBgDrawColor(rgbToHex(newRgb.r, newRgb.g, newRgb.b));
+                              }}
+                              className="w-7 text-[9px] px-0.5 py-0.5 border border-stone-200 rounded text-center bg-white"
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[9px] text-stone-400 w-8">선 굵기</span>
+                    <input type="range" min="1" max="20" value={bgDrawWidth} onChange={e => setBgDrawWidth(Number(e.target.value))} className="flex-1 h-1 accent-blue-600" title="선 굵기" />
+                    <span className="text-[10px] font-mono text-stone-500 w-4">{bgDrawWidth}</span>
+                  </div>
+                  {bgDrawTool === 'text' && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-[9px] text-stone-400 w-8">글자 크기</span>
+                      <input type="range" min="8" max="100" value={bgFontSize} onChange={e => setBgFontSize(Number(e.target.value))} className="flex-1 h-1 accent-blue-600" title="글자 크기" />
+                      <span className="text-[10px] font-mono text-stone-500 w-4">{bgFontSize}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Architectural Symbols */}
+                <div className="pt-2 border-t border-stone-100">
+                  <div className="text-[10px] font-bold text-stone-400 uppercase mb-2">도면 심볼</div>
+                  <div className="grid grid-cols-4 gap-1">
+                    {ARCH_SYMBOLS.map(symbol => (
+                      <button
+                        key={symbol.id}
+                        onClick={() => {
+                          setBgDrawTool('symbol');
+                          setSelectedSymbolId(symbol.id);
+                        }}
+                        className={`p-1.5 rounded border transition-all flex flex-col items-center gap-1 ${bgDrawTool === 'symbol' && selectedSymbolId === symbol.id ? 'bg-blue-50 border-blue-200 text-blue-600' : 'bg-white border-stone-100 hover:border-stone-200 text-stone-500'}`}
+                        title={symbol.label}
+                      >
+                        <svg width="16" height="16" viewBox="0 0 50 50" fill="none" stroke="currentColor" strokeWidth="3">
+                          <path d={symbol.path} />
+                        </svg>
+                        <span className="text-[8px] truncate w-full text-center">{symbol.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
+
+          {/* Equipment Icons */}
+          {!isBgEditMode && (
+            <>
+              <section>
+                <h2 className="text-xs font-bold uppercase tracking-wider text-stone-400 mb-3 px-2">일반</h2>
             <div className="grid grid-cols-4 gap-2 mb-6">
               {ITEM_DEFINITIONS.filter(def => def.category === 'general').map((def) => (
                 <button
@@ -1587,6 +1867,8 @@ export default function App() {
               </button>
             </div>
           </section>
+          </>
+          )}
         </div>
 
       </div>
@@ -1707,7 +1989,8 @@ export default function App() {
             style={{ 
               width: currentLayout.canvasSize.width * zoom, 
               height: currentLayout.canvasSize.height * zoom,
-              flexShrink: 0 
+              flexShrink: 0,
+              cursor: isBgEditMode ? (bgDrawTool === 'select' ? 'default' : 'crosshair') : (isDrawingLine ? 'crosshair' : 'default')
             }}
           >
             <Stage
@@ -1724,6 +2007,33 @@ export default function App() {
                 const adjustedX = pos.x / zoom;
                 const adjustedY = pos.y / zoom;
 
+                if (isBgEditMode && currentBgElement) {
+                  if (currentBgElement.type === 'pen') {
+                    setCurrentBgElement({
+                      ...currentBgElement,
+                      points: [...(currentBgElement.points || []), adjustedX, adjustedY]
+                    });
+                  } else if (currentBgElement.type === 'rect') {
+                    const snappedX = showGrid ? snapToGrid(adjustedX) : adjustedX;
+                    const snappedY = showGrid ? snapToGrid(adjustedY) : adjustedY;
+                    setCurrentBgElement({
+                      ...currentBgElement,
+                      width: snappedX - (currentBgElement.x || 0),
+                      height: snappedY - (currentBgElement.y || 0)
+                    });
+                  } else if (currentBgElement.type === 'circle') {
+                    const snappedX = showGrid ? snapToGrid(adjustedX) : adjustedX;
+                    const snappedY = showGrid ? snapToGrid(adjustedY) : adjustedY;
+                    const dx = snappedX - (currentBgElement.x || 0);
+                    const dy = snappedY - (currentBgElement.y || 0);
+                    setCurrentBgElement({
+                      ...currentBgElement,
+                      radius: Math.sqrt(dx * dx + dy * dy)
+                    });
+                  }
+                  return;
+                }
+
                 if (isDrawingLine && lineStartId) {
                   setMousePos({ x: adjustedX, y: adjustedY });
                 }
@@ -1739,6 +2049,66 @@ export default function App() {
 
                 const adjustedX = pos.x / zoom;
                 const adjustedY = pos.y / zoom;
+                const snappedX = showGrid ? snapToGrid(adjustedX) : adjustedX;
+                const snappedY = showGrid ? snapToGrid(adjustedY) : adjustedY;
+
+                if (isBgEditMode) {
+                  if (bgDrawTool === 'eraser' || bgDrawTool === 'select') {
+                    const clickedOnEmpty = e.target === e.target.getStage();
+                    if (clickedOnEmpty && bgDrawTool === 'select') {
+                      setSelectedBgElementId(null);
+                    }
+                    return; // Handled by onClick on the shape
+                  }
+                  
+                  const id = Date.now().toString();
+                  if (bgDrawTool === 'pen') {
+                    setCurrentBgElement({ id, type: 'pen', points: [adjustedX, adjustedY], stroke: bgDrawColor, strokeWidth: bgDrawWidth });
+                  } else if (bgDrawTool === 'rect') {
+                    setCurrentBgElement({ id, type: 'rect', x: snappedX, y: snappedY, width: 0, height: 0, stroke: bgDrawColor, strokeWidth: bgDrawWidth });
+                  } else if (bgDrawTool === 'circle') {
+                    setCurrentBgElement({ id, type: 'circle', x: snappedX, y: snappedY, radius: 0, stroke: bgDrawColor, strokeWidth: bgDrawWidth });
+                  } else if (bgDrawTool === 'symbol' && selectedSymbolId) {
+                    const symbol = ARCH_SYMBOLS.find(s => s.id === selectedSymbolId);
+                    if (symbol) {
+                      const newBgElements: BackgroundElement[] = [...(currentLayout.backgroundElements || []), {
+                        id: Date.now().toString(),
+                        type: 'symbol',
+                        symbolType: symbol.id,
+                        pathData: symbol.path,
+                        x: snappedX - 25,
+                        y: snappedY - 25,
+                        stroke: bgDrawColor,
+                        strokeWidth: bgDrawWidth,
+                        scaleX: 1,
+                        scaleY: 1,
+                        rotation: 0
+                      }];
+                      pushToHistory();
+                      updateCurrentLayout({ backgroundElements: newBgElements });
+                    }
+                  } else if (bgDrawTool === 'text') {
+                    const text = prompt('입력할 텍스트를 입력하세요:');
+                    if (text) {
+                      const newBgElements: BackgroundElement[] = [...(currentLayout.backgroundElements || []), {
+                        id: Date.now().toString(),
+                        type: 'text',
+                        text,
+                        fontSize: bgFontSize,
+                        x: snappedX,
+                        y: snappedY,
+                        stroke: bgDrawColor,
+                        strokeWidth: bgDrawWidth,
+                        scaleX: 1,
+                        scaleY: 1,
+                        rotation: 0
+                      }];
+                      pushToHistory();
+                      updateCurrentLayout({ backgroundElements: newBgElements });
+                    }
+                  }
+                  return;
+                }
 
                 const clickedOnEmpty = e.target === e.target.getStage();
                 if (clickedOnEmpty) {
@@ -1752,9 +2122,166 @@ export default function App() {
                   }
                 }
               }}
-              onMouseUp={() => {
+              onMouseUp={(e) => {
+                if (isBgEditMode && currentBgElement) {
+                  pushToHistory();
+                  const newBgElements = [...(currentLayout.backgroundElements || []), currentBgElement];
+                  updateCurrentLayout({ backgroundElements: newBgElements });
+                  setCurrentBgElement(null);
+                  return;
+                }
+
                 if (isSelecting) {
                   // Calculate selected items
+                  const x1 = Math.min(selectionRect.x1, selectionRect.x2);
+                  const y1 = Math.min(selectionRect.y1, selectionRect.y2);
+                  const x2 = Math.max(selectionRect.x1, selectionRect.x2);
+                  const y2 = Math.max(selectionRect.y1, selectionRect.y2);
+
+                  const selected = currentLayout.items.filter(item => {
+                    const isHidden = hiddenItemTypes.includes(item.type);
+                    if (isHidden) return false;
+                    return item.x >= x1 && item.x <= x2 && item.y >= y1 && item.y <= y2;
+                  }).map(item => item.id);
+
+                  setSelectedIds(selected);
+                  setIsSelecting(false);
+                  setSelectionRect({ x1: 0, y1: 0, x2: 0, y2: 0, visible: false });
+                }
+              }}
+              onTouchStart={(e) => {
+                const stage = e.target.getStage();
+                const pos = stage?.getPointerPosition();
+                if (!pos) return;
+
+                const adjustedX = pos.x / zoom;
+                const adjustedY = pos.y / zoom;
+                const snappedX = showGrid ? snapToGrid(adjustedX) : adjustedX;
+                const snappedY = showGrid ? snapToGrid(adjustedY) : adjustedY;
+
+                if (isBgEditMode) {
+                  if (bgDrawTool === 'eraser' || bgDrawTool === 'select') {
+                    const clickedOnEmpty = e.target === e.target.getStage();
+                    if (clickedOnEmpty && bgDrawTool === 'select') {
+                      setSelectedBgElementId(null);
+                    }
+                    return;
+                  }
+                  
+                  const id = Date.now().toString();
+                  if (bgDrawTool === 'pen') {
+                    setCurrentBgElement({ id, type: 'pen', points: [adjustedX, adjustedY], stroke: bgDrawColor, strokeWidth: bgDrawWidth });
+                  } else if (bgDrawTool === 'rect') {
+                    setCurrentBgElement({ id, type: 'rect', x: snappedX, y: snappedY, width: 0, height: 0, stroke: bgDrawColor, strokeWidth: bgDrawWidth });
+                  } else if (bgDrawTool === 'circle') {
+                    setCurrentBgElement({ id, type: 'circle', x: snappedX, y: snappedY, radius: 0, stroke: bgDrawColor, strokeWidth: bgDrawWidth });
+                  } else if (bgDrawTool === 'symbol' && selectedSymbolId) {
+                    const symbol = ARCH_SYMBOLS.find(s => s.id === selectedSymbolId);
+                    if (symbol) {
+                      const newBgElements: BackgroundElement[] = [...(currentLayout.backgroundElements || []), {
+                        id: Date.now().toString(),
+                        type: 'symbol',
+                        symbolType: symbol.id,
+                        pathData: symbol.path,
+                        x: snappedX - 25,
+                        y: snappedY - 25,
+                        stroke: bgDrawColor,
+                        strokeWidth: bgDrawWidth,
+                        scaleX: 1,
+                        scaleY: 1,
+                        rotation: 0
+                      }];
+                      pushToHistory();
+                      updateCurrentLayout({ backgroundElements: newBgElements });
+                    }
+                  } else if (bgDrawTool === 'text') {
+                    const text = prompt('입력할 텍스트를 입력하세요:');
+                    if (text) {
+                      const newBgElements: BackgroundElement[] = [...(currentLayout.backgroundElements || []), {
+                        id: Date.now().toString(),
+                        type: 'text',
+                        text,
+                        fontSize: bgFontSize,
+                        x: snappedX,
+                        y: snappedY,
+                        stroke: bgDrawColor,
+                        strokeWidth: bgDrawWidth,
+                        scaleX: 1,
+                        scaleY: 1,
+                        rotation: 0
+                      }];
+                      pushToHistory();
+                      updateCurrentLayout({ backgroundElements: newBgElements });
+                    }
+                  }
+                  return;
+                }
+
+                const clickedOnEmpty = e.target === e.target.getStage();
+                if (clickedOnEmpty) {
+                  setSelectedIds([]);
+                  setHighlightedItemType(null);
+                  if (isDrawingLine) {
+                    setLineStartId(null);
+                  } else {
+                    setIsSelecting(true);
+                    setSelectionRect({ x1: adjustedX, y1: adjustedY, x2: adjustedX, y2: adjustedY, visible: true });
+                  }
+                }
+              }}
+              onTouchMove={(e) => {
+                const stage = e.target.getStage();
+                const pos = stage?.getPointerPosition();
+                if (!pos) return;
+                
+                const adjustedX = pos.x / zoom;
+                const adjustedY = pos.y / zoom;
+
+                if (isBgEditMode && currentBgElement) {
+                  if (currentBgElement.type === 'pen') {
+                    setCurrentBgElement({
+                      ...currentBgElement,
+                      points: [...(currentBgElement.points || []), adjustedX, adjustedY]
+                    });
+                  } else if (currentBgElement.type === 'rect') {
+                    const snappedX = showGrid ? snapToGrid(adjustedX) : adjustedX;
+                    const snappedY = showGrid ? snapToGrid(adjustedY) : adjustedY;
+                    setCurrentBgElement({
+                      ...currentBgElement,
+                      width: snappedX - (currentBgElement.x || 0),
+                      height: snappedY - (currentBgElement.y || 0)
+                    });
+                  } else if (currentBgElement.type === 'circle') {
+                    const snappedX = showGrid ? snapToGrid(adjustedX) : adjustedX;
+                    const snappedY = showGrid ? snapToGrid(adjustedY) : adjustedY;
+                    const dx = snappedX - (currentBgElement.x || 0);
+                    const dy = snappedY - (currentBgElement.y || 0);
+                    setCurrentBgElement({
+                      ...currentBgElement,
+                      radius: Math.sqrt(dx * dx + dy * dy)
+                    });
+                  }
+                  return;
+                }
+
+                if (isDrawingLine && lineStartId) {
+                  setMousePos({ x: adjustedX, y: adjustedY });
+                }
+
+                if (isSelecting) {
+                  setSelectionRect(prev => ({ ...prev, x2: adjustedX, y2: adjustedY }));
+                }
+              }}
+              onTouchEnd={() => {
+                if (isBgEditMode && currentBgElement) {
+                  pushToHistory();
+                  const newBgElements = [...(currentLayout.backgroundElements || []), currentBgElement];
+                  updateCurrentLayout({ backgroundElements: newBgElements });
+                  setCurrentBgElement(null);
+                  return;
+                }
+
+                if (isSelecting) {
                   const x1 = Math.min(selectionRect.x1, selectionRect.x2);
                   const y1 = Math.min(selectionRect.y1, selectionRect.y2);
                   const x2 = Math.max(selectionRect.x1, selectionRect.x2);
@@ -1784,6 +2311,197 @@ export default function App() {
                   />
                 )}
                 
+                {/* Background Drawn Elements */}
+                {(currentLayout.backgroundElements || []).map((el) => {
+                  const isEraserMode = isBgEditMode && bgDrawTool === 'eraser';
+                  const isSelectMode = isBgEditMode && bgDrawTool === 'select';
+                  const isInteractive = isEraserMode || isSelectMode;
+                  
+                  const handleInteract = (e: any) => {
+                    if (isEraserMode) {
+                      pushToHistory();
+                      updateCurrentLayout({
+                        backgroundElements: currentLayout.backgroundElements?.filter(b => b.id !== el.id)
+                      });
+                    } else if (isSelectMode) {
+                      e.cancelBubble = true;
+                      setSelectedBgElementId(el.id);
+                    }
+                  };
+
+                  const handleDragEnd = (e: any) => {
+                    if (!isSelectMode) return;
+                    pushToHistory();
+                    const newX = showGrid ? snapToGrid(e.target.x()) : e.target.x();
+                    const newY = showGrid ? snapToGrid(e.target.y()) : e.target.y();
+                    updateCurrentLayout({
+                      backgroundElements: currentLayout.backgroundElements?.map(b => 
+                        b.id === el.id ? { ...b, x: newX, y: newY } : b
+                      )
+                    });
+                  };
+
+                  const handleTransformEnd = (e: any) => {
+                    if (!isSelectMode) return;
+                    const node = e.target;
+                    pushToHistory();
+                    
+                    const newX = showGrid ? snapToGrid(node.x()) : node.x();
+                    const newY = showGrid ? snapToGrid(node.y()) : node.y();
+                    
+                    updateCurrentLayout({
+                      backgroundElements: currentLayout.backgroundElements?.map(b => 
+                        b.id === el.id ? { 
+                          ...b, 
+                          x: newX, 
+                          y: newY, 
+                          scaleX: node.scaleX(), 
+                          scaleY: node.scaleY(),
+                          rotation: node.rotation()
+                        } : b
+                      )
+                    });
+                  };
+
+                  const handleDragMove = (e: any) => {
+                    if (!isSelectMode) return;
+                    if (showGrid) {
+                      e.target.x(snapToGrid(e.target.x()));
+                      e.target.y(snapToGrid(e.target.y()));
+                    }
+                  };
+
+                  const commonProps = {
+                    id: `bg-${el.id}`,
+                    listening: isInteractive,
+                    onClick: handleInteract,
+                    onMouseDown: handleInteract,
+                    onTouchStart: handleInteract,
+                    onTouchEnd: handleInteract,
+                    onMouseEnter: (e: any) => {
+                      if (isInteractive) {
+                        const stage = e.target.getStage();
+                        if (stage) {
+                          if (isEraserMode) {
+                            // Custom eraser cursor
+                            stage.container().style.cursor = 'url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImJsYWNrIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0ibTcgMjEtNC4zLTQuM2MtMS0xLTEtMi41IDAtMy40bDkuOS05LjljMS0xIDIuNS0xIDMuNCAwbDQuNCA0LjRjMSAxIDEgMi41IDAgMy40TDEwLjUgMjF6Ii8+PHBhdGggZD0ibTE1IDUgNCA0Ii8+PC9zdmc+"), auto';
+                          } else {
+                            stage.container().style.cursor = 'pointer';
+                          }
+                        }
+                      }
+                    },
+                    onMouseLeave: (e: any) => {
+                      if (isInteractive) {
+                        const stage = e.target.getStage();
+                        if (stage) stage.container().style.cursor = bgDrawTool === 'select' ? 'default' : 'crosshair';
+                      }
+                    },
+                    draggable: isSelectMode,
+                    onDragMove: handleDragMove,
+                    onDragEnd: handleDragEnd,
+                    onTransformEnd: handleTransformEnd,
+                    x: el.x || 0,
+                    y: el.y || 0,
+                    scaleX: el.scaleX || 1,
+                    scaleY: el.scaleY || 1,
+                    rotation: el.rotation || 0,
+                  };
+
+                  if (el.type === 'pen') {
+                    return <Line key={el.id} points={el.points} stroke={el.stroke} strokeWidth={el.strokeWidth} tension={0.5} lineCap="round" lineJoin="round" strokeScaleEnabled={false} {...commonProps} />;
+                  }
+                  if (el.type === 'rect') {
+                    // Rect uses width/height instead of points, but x/y are already in commonProps
+                    // We need to adjust x/y if they were saved differently, but they are saved as x/y
+                    return <Rect key={el.id} width={el.width} height={el.height} stroke={el.stroke} strokeWidth={el.strokeWidth} strokeScaleEnabled={false} {...commonProps} />;
+                  }
+                  if (el.type === 'circle') {
+                    return <Circle key={el.id} radius={el.radius} stroke={el.stroke} strokeWidth={el.strokeWidth} strokeScaleEnabled={false} {...commonProps} />;
+                  }
+                  if (el.type === 'symbol') {
+                    const isDoor = el.symbolType === 'door';
+                    return (
+                      <Group key={el.id} {...commonProps}>
+                        {/* Invisible hit area for easier selection */}
+                        <Rect
+                          x={0}
+                          y={0}
+                          width={50}
+                          height={50}
+                          fill="transparent"
+                          strokeEnabled={false}
+                          listening={true}
+                        />
+                        {isDoor && (
+                          <Rect
+                            x={-5}
+                            y={0}
+                            width={10}
+                            height={50}
+                            fill="white"
+                            strokeEnabled={false}
+                            listening={false}
+                          />
+                        )}
+                        <Path 
+                          data={el.pathData} 
+                          stroke={el.stroke} 
+                          strokeWidth={el.strokeWidth} 
+                          strokeScaleEnabled={false} 
+                        />
+                      </Group>
+                    );
+                  }
+                  if (el.type === 'text') {
+                    return (
+                      <Text
+                        key={el.id}
+                        text={el.text}
+                        fontSize={el.fontSize || 20}
+                        fill={el.stroke}
+                        {...commonProps}
+                      />
+                    );
+                  }
+                  return null;
+                })}
+
+                {/* Current Drawing Element */}
+                {currentBgElement && (
+                  currentBgElement.type === 'pen' ? (
+                    <Line points={currentBgElement.points} stroke={currentBgElement.stroke} strokeWidth={currentBgElement.strokeWidth} tension={0.5} lineCap="round" lineJoin="round" listening={false} strokeScaleEnabled={false} />
+                  ) : currentBgElement.type === 'rect' ? (
+                    <Rect x={currentBgElement.x} y={currentBgElement.y} width={currentBgElement.width} height={currentBgElement.height} stroke={currentBgElement.stroke} strokeWidth={currentBgElement.strokeWidth} listening={false} strokeScaleEnabled={false} />
+                  ) : currentBgElement.type === 'circle' ? (
+                    <Circle x={currentBgElement.x} y={currentBgElement.y} radius={currentBgElement.radius} stroke={currentBgElement.stroke} strokeWidth={currentBgElement.strokeWidth} listening={false} strokeScaleEnabled={false} />
+                  ) : null
+                )}
+
+                {isBgEditMode && selectedBgElementId && (
+                  <Transformer
+                    ref={bgTransformerRef}
+                    enabledAnchors={['top-left', 'top-center', 'top-right', 'middle-right', 'middle-left', 'bottom-left', 'bottom-center', 'bottom-right']}
+                    rotateEnabled={true}
+                    keepRatio={false}
+                    boundBoxFunc={(oldBox, newBox) => {
+                      if (Math.abs(newBox.width) < 5 || Math.abs(newBox.height) < 5) {
+                        return oldBox;
+                      }
+                      if (showGrid) {
+                        return {
+                          ...newBox,
+                          x: snapToGrid(newBox.x),
+                          y: snapToGrid(newBox.y),
+                          width: snapToGrid(newBox.width),
+                          height: snapToGrid(newBox.height)
+                        };
+                      }
+                      return newBox;
+                    }}
+                  />
+                )}
+
                 {renderGrid()}
 
                 {/* Selection Rectangle */}
@@ -1816,6 +2534,7 @@ export default function App() {
                       dash={[5, 5]}
                       opacity={0.6}
                       hitStrokeWidth={20}
+                      listening={!isBgEditMode}
                       onMouseEnter={(e) => {
                         const stage = e.target.getStage();
                         if (stage && !isDrawingLine) stage.container().style.cursor = 'pointer';
@@ -1875,7 +2594,8 @@ export default function App() {
                     id={item.id}
                     x={item.x}
                     y={item.y}
-                    draggable={!isDrawingLine}
+                    draggable={!isDrawingLine && !isBgEditMode}
+                    listening={!isBgEditMode}
                     opacity={highlightedItemType && !isHighlighted ? 0.2 : 1}
                     onDragStart={(e) => {
                       if (isDrawingLine) return;
@@ -1885,7 +2605,14 @@ export default function App() {
                       setDragStartPos({ x: item.x, y: item.y });
                     }}
                     onDragMove={(e) => {
-                      if (isDrawingLine || selectedIds.length <= 1) return;
+                      if (isDrawingLine) return;
+                      
+                      if (showGrid) {
+                        e.target.x(snapToGrid(e.target.x()));
+                        e.target.y(snapToGrid(e.target.y()));
+                      }
+
+                      if (selectedIds.length <= 1) return;
                       
                       const dx = e.target.x() - (dragStartPos?.x || item.x);
                       const dy = e.target.y() - (dragStartPos?.y || item.y);
@@ -1909,8 +2636,11 @@ export default function App() {
                     onDragEnd={(e) => {
                       if (isDrawingLine) return;
                       
-                      const dx = e.target.x() - (dragStartPos?.x || item.x);
-                      const dy = e.target.y() - (dragStartPos?.y || item.y);
+                      const finalX = showGrid ? snapToGrid(e.target.x()) : e.target.x();
+                      const finalY = showGrid ? snapToGrid(e.target.y()) : e.target.y();
+                      
+                      const dx = finalX - (dragStartPos?.x || item.x);
+                      const dy = finalY - (dragStartPos?.y || item.y);
 
                       if (selectedIds.length > 1) {
                         const updatedItems = currentLayout.items.map(i => {
@@ -1921,7 +2651,7 @@ export default function App() {
                         });
                         updateCurrentLayout({ items: updatedItems });
                       } else {
-                        updateItemPosition(item.id, e.target.x(), e.target.y());
+                        updateItemPosition(item.id, finalX, finalY);
                       }
                       setDragStartPos(null);
                     }}
